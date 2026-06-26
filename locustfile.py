@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import itertools
+import base64
+import json
 import os
 import random
 import threading
@@ -140,6 +142,20 @@ def api_path(path: str) -> str:
     return f"{API_PREFIX}{normalized}"
 
 
+def jwt_subject(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        claims = json.loads(decoded)
+        subject = claims.get("sub")
+        return str(subject) if subject else None
+    except Exception:
+        return None
+
+
 class KakamuApiUser(HttpUser):
     wait_time = between(MIN_WAIT_SECONDS, MAX_WAIT_SECONDS)
 
@@ -147,6 +163,7 @@ class KakamuApiUser(HttpUser):
         self.credential = _next_credential()
         self.access_token: str | None = None
         self.refresh_token: str | None = None
+        self.user_id: str | None = None
         self.token_issued_at = 0.0
         self.persona_id: str | None = self.credential.persona_id
         self.persona_ids: list[str] = []
@@ -229,6 +246,7 @@ class KakamuApiUser(HttpUser):
 
         self.access_token = payload.get("access_token")
         self.refresh_token = payload.get("refresh_token")
+        self.user_id = jwt_subject(self.access_token)
         self.token_issued_at = time.monotonic()
 
     def refresh_access_token_if_needed(self) -> None:
@@ -247,6 +265,7 @@ class KakamuApiUser(HttpUser):
         if payload and payload.get("access_token"):
             self.access_token = payload.get("access_token")
             self.refresh_token = payload.get("refresh_token")
+            self.user_id = jwt_subject(self.access_token)
             self.token_issued_at = time.monotonic()
         else:
             self.login()
@@ -281,6 +300,11 @@ class KakamuApiUser(HttpUser):
             return
 
         self.persona_ids = [str(item["id"]) for item in payload if item.get("id")]
+        if not self.user_id:
+            for item in payload:
+                if item.get("user_id"):
+                    self.user_id = str(item["user_id"])
+                    break
         if not self.persona_id and self.persona_ids:
             self.persona_id = random.choice(self.persona_ids)
 
@@ -314,7 +338,13 @@ class KakamuApiUser(HttpUser):
     @tag("read", "account")
     @task(2)
     def read_account_context(self) -> None:
-        self._request_json("GET", "/users/me", name="GET /users/me")
+        if self.user_id:
+            self._request_json(
+                "GET",
+                f"/users/{self.user_id}",
+                name="GET /users/[user_id]",
+                include_persona=False,
+            )
         self.load_personas()
 
     @tag("read", "feed")
