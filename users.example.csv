@@ -1,0 +1,3 @@
+email,password,persona_id,weight,enabled
+load-user-001@example.com,change-me,,1,true
+load-user-002@example.com,change-me,,1,true

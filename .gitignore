@@ -1,0 +1,41 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+
+# Locust credentials generated for real test runs
+users.csv
+users.*.csv
+!users.example.csv
+
+# Generated Locust reports and CSV outputs
+reports/
+*.html
+*_stats.csv
+*_stats_history.csv
+*_failures.csv
+*_exceptions.csv
+
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
