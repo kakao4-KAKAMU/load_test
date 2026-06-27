@@ -172,6 +172,8 @@ class KakamuApiUser(HttpUser):
         self.movie_ids: list[str] = list(SEED_MOVIE_IDS)
         self.user_ids: list[str] = list(SEED_USER_IDS)
 
+        time.sleep(random.uniform(0, 2))  # 0 ~ 2초 랜덤 대기
+
         if self.credential.email:
             self.login()
             if self.access_token:
