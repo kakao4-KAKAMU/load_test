@@ -49,6 +49,9 @@ def _normalize_prefix(prefix: str) -> str:
 
 API_PREFIX = _normalize_prefix(os.getenv("KAKAMU_API_PREFIX", "/api"))
 USER_FILE = Path(os.getenv("KAKAMU_TEST_USERS_FILE", str(ROOT / "users.csv")))
+TOKEN_FILE = Path(os.getenv("KAKAMU_TEST_TOKENS_FILE", str(ROOT / "tokens.csv")))
+USE_PREISSUED_TOKENS = _env_bool("KAKAMU_USE_PREISSUED_TOKENS", TOKEN_FILE.exists())
+ALLOW_TOKEN_LOGIN_FALLBACK = _env_bool("KAKAMU_ALLOW_TOKEN_LOGIN_FALLBACK", False)
 ENABLE_WRITES = _env_bool("KAKAMU_ENABLE_WRITES", False)
 ALLOW_ANONYMOUS = _env_bool("KAKAMU_ALLOW_ANONYMOUS", False)
 TOKEN_REFRESH_SECONDS = _env_float("KAKAMU_TOKEN_REFRESH_SECONDS", 60 * 150)
@@ -73,6 +76,15 @@ class Credential:
     email: str
     password: str
     persona_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PreissuedToken:
+    email: str
+    access_token: str
+    refresh_token: str | None = None
+    persona_id: str | None = None
+    user_id: str | None = None
 
 
 def _load_credentials() -> list[Credential]:
@@ -127,14 +139,59 @@ def _load_credentials() -> list[Credential]:
     return credentials
 
 
+def _load_preissued_tokens() -> list[PreissuedToken]:
+    tokens: list[PreissuedToken] = []
+
+    if not TOKEN_FILE.exists():
+        return tokens
+
+    with TOKEN_FILE.open(newline="", encoding="utf-8-sig") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            enabled = row.get("enabled", "true").strip().lower()
+            if enabled in {"0", "false", "no", "n", "off"}:
+                continue
+
+            access_token = row.get("access_token", "").strip()
+            if not access_token:
+                continue
+
+            weight_raw = row.get("weight", "1").strip()
+            try:
+                weight = max(1, int(weight_raw))
+            except ValueError:
+                weight = 1
+
+            token = PreissuedToken(
+                email=row.get("email", "").strip(),
+                access_token=access_token,
+                refresh_token=row.get("refresh_token", "").strip() or None,
+                persona_id=row.get("persona_id", "").strip() or None,
+                user_id=row.get("user_id", "").strip() or None,
+            )
+            tokens.extend(token for _ in range(weight))
+
+    return tokens
+
+
 CREDENTIALS = _load_credentials()
+PREISSUED_TOKENS = _load_preissued_tokens() if USE_PREISSUED_TOKENS else []
 _credential_cycle = itertools.cycle(CREDENTIALS)
 _credential_lock = threading.Lock()
+_preissued_token_cycle = itertools.cycle(PREISSUED_TOKENS) if PREISSUED_TOKENS else None
+_preissued_token_lock = threading.Lock()
 
 
 def _next_credential() -> Credential:
     with _credential_lock:
         return next(_credential_cycle)
+
+
+def _next_preissued_token() -> PreissuedToken | None:
+    if _preissued_token_cycle is None:
+        return None
+    with _preissued_token_lock:
+        return next(_preissued_token_cycle)
 
 
 def api_path(path: str) -> str:
@@ -165,6 +222,7 @@ class KakamuApiUser(HttpUser):
         self.refresh_token: str | None = None
         self.user_id: str | None = None
         self.token_issued_at = 0.0
+        self.using_preissued_token = False
         self.persona_id: str | None = self.credential.persona_id
         self.persona_ids: list[str] = []
         self.post_ids: list[int] = list(SEED_POST_IDS)
@@ -174,12 +232,31 @@ class KakamuApiUser(HttpUser):
 
         time.sleep(random.uniform(0, 2))  # 0 ~ 2초 랜덤 대기
 
-        if self.credential.email:
+        preissued_token = _next_preissued_token() if USE_PREISSUED_TOKENS else None
+        if preissued_token:
+            self.use_preissued_token(preissued_token)
+        elif self.credential.email:
+            # 기존 로그인 방식. 다시 로그인 기반 테스트를 할 때 참고용으로 남겨둡니다.
+            # if self.credential.email:
+            #     self.login()
+            #     if self.access_token:
+            #         self.load_personas()
+            #         self.collect_feed()
+            #         self.collect_movie_candidates()
             self.login()
-            if self.access_token:
-                self.load_personas()
-                self.collect_feed()
-                self.collect_movie_candidates()
+
+        if self.access_token:
+            self.load_personas()
+            self.collect_feed()
+            self.collect_movie_candidates()
+
+    def use_preissued_token(self, token: PreissuedToken) -> None:
+        self.access_token = token.access_token
+        self.refresh_token = token.refresh_token
+        self.user_id = token.user_id or jwt_subject(token.access_token)
+        self.persona_id = token.persona_id or self.persona_id
+        self.token_issued_at = time.monotonic()
+        self.using_preissued_token = True
 
     def _headers(self, include_persona: bool = True) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -270,6 +347,10 @@ class KakamuApiUser(HttpUser):
             self.user_id = jwt_subject(self.access_token)
             self.token_issued_at = time.monotonic()
         else:
+            if self.using_preissued_token and not ALLOW_TOKEN_LOGIN_FALLBACK:
+                self.access_token = None
+                self.refresh_token = None
+                return
             self.login()
 
     def _remember_unique(self, bucket: list[Any], value: Any, limit: int = 500) -> None:
